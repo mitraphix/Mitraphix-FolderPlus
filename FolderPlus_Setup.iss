@@ -2,7 +2,7 @@
 ; Unique ID for seamless background updates. NEVER change this GUID in future updates.
 AppId={{MITRAPHIX-FOLDER-PLUS-8A7B6C5D4E3F2G1H}
 AppName=Mitraphix Folder+
-AppVersion=1.2.0
+AppVersion=1.3.0
 AppPublisher=Mitraphix Design
 AppPublisherURL=https://www.mitraphix.com
 DefaultDirName={commonpf}\Mitraphix\FolderPlus
@@ -12,7 +12,7 @@ UninstallDisplayIcon={app}\logo.ico
 
 ; Output location: Project directory
 OutputDir=C:\Users\smitr\source\repos\FolderPlus\FolderPlus\Output
-OutputBaseFilename=Mitraphix_FolderPlus_Setup_v1.2
+OutputBaseFilename=Mitraphix_FolderPlus_Setup_v1.3
 Compression=lzma
 SolidCompression=yes
 

@@ -31,14 +31,21 @@ namespace FolderPlus
         private string templatesDir;
         private string separatorsFile;
         private string settingsFile;
+        private string newPlusSettingsFile;
         private string hotkeyFile;
         private readonly string[] defaultSeparators = { "None", "Space ( )", "_", "-", ".", "+", "@", "#" };
 
+        // Main UI Controls
         private TextBox txtNames;
         private ComboBox cmbSep, cmbStyle, cmbPreNum;
         private NumericUpDown numStart, numEnd;
         private Panel pnlHamburger;
         private NotifyIcon trayIcon;
+
+        // New+ UI Controls
+        private CheckBox chkMulti;
+        private ComboBox cmbNewSep, cmbNewStyle;
+        private NumericUpDown numNewEnd;
 
         // Dynamic Hotkey Variables
         private int hk1Mod = 6;
@@ -56,6 +63,7 @@ namespace FolderPlus
             templatesDir = Path.Combine(appDataPath, "Templates");
             separatorsFile = Path.Combine(appDataPath, "separators.txt");
             settingsFile = Path.Combine(appDataPath, "state.txt");
+            newPlusSettingsFile = Path.Combine(appDataPath, "newplus_state.txt");
             hotkeyFile = Path.Combine(appDataPath, "hotkeys.txt");
 
             if (!Directory.Exists(templatesDir)) Directory.CreateDirectory(templatesDir);
@@ -247,7 +255,7 @@ namespace FolderPlus
 
         private void LoadLastState()
         {
-            if (File.Exists(settingsFile) && !isNewPlusMode)
+            if (!isNewPlusMode && File.Exists(settingsFile))
             {
                 try
                 {
@@ -260,6 +268,20 @@ namespace FolderPlus
                         cmbStyle.SelectedIndex = int.Parse(lines[3]);
                         numStart.Value = decimal.Parse(lines[4]);
                         numEnd.Value = decimal.Parse(lines[5]);
+                    }
+                }
+                catch { }
+            }
+            else if (isNewPlusMode && File.Exists(newPlusSettingsFile))
+            {
+                try
+                {
+                    string[] lines = File.ReadAllLines(newPlusSettingsFile);
+                    if (lines.Length >= 3)
+                    {
+                        cmbNewSep.SelectedIndex = int.Parse(lines[0]);
+                        cmbNewStyle.SelectedIndex = int.Parse(lines[1]);
+                        numNewEnd.Value = decimal.Parse(lines[2]);
                     }
                 }
                 catch { }
@@ -279,6 +301,15 @@ namespace FolderPlus
                     numEnd.Value.ToString()
                 };
                 File.WriteAllLines(settingsFile, state);
+            }
+            else if (isNewPlusMode && cmbNewSep != null)
+            {
+                string[] state = {
+                    cmbNewSep.SelectedIndex.ToString(),
+                    cmbNewStyle.SelectedIndex.ToString(),
+                    numNewEnd.Value.ToString()
+                };
+                File.WriteAllLines(newPlusSettingsFile, state);
             }
         }
 
@@ -331,7 +362,7 @@ namespace FolderPlus
             txtFPlus.KeyDown += captureKey;
             txtNPlus.KeyDown += captureKey;
 
-            Button btnSave = new Button() { Text = "Save & Apply", Location = new Point(20, 145), Size = new Size(290, 45), BackColor = brandBlue, ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 10f, FontStyle.Bold) };
+            Button btnSave = new Button() { Text = "SAVE && APPLY", Location = new Point(20, 145), Size = new Size(290, 45), BackColor = brandBlue, ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 10f, FontStyle.Bold) };
             btnSave.FlatAppearance.BorderSize = 0;
             btnSave.Click += (s, e) => {
                 SaveAndApplyHotkeys(temp1Mod, temp1Key, temp2Mod, temp2Key);
@@ -343,7 +374,7 @@ namespace FolderPlus
             hkForm.ShowDialog();
         }
 
-        // --- CORE UI GENERATION ---
+        // --- CORE UI GENERATION (NEW+) ---
         private void SetupNewPlusUI()
         {
             this.Text = "Mitraphix New+";
@@ -355,12 +386,50 @@ namespace FolderPlus
             Label lblInfo = new Label() { Text = "Select Template to Deploy:", Location = new Point(18, 18), AutoSize = true, Font = new Font("Segoe UI", 11f, FontStyle.Bold) };
             this.Controls.Add(lblInfo);
 
+            // Native Windows 10/11 Settings Gear Icon
+            Button btnManage = new Button()
+            {
+                Text = "\uE713",
+                Location = new Point(255, 14),
+                Size = new Size(32, 32),
+                Font = new Font("Segoe MDL2 Assets", 12f, FontStyle.Bold),
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand,
+                BackColor = Color.White,
+                ForeColor = Color.Black
+            };
+            btnManage.FlatAppearance.BorderSize = 0;
+            btnManage.Click += (s, e) => Process.Start("explorer.exe", templatesDir);
+            this.Controls.Add(btnManage);
+
+            // --- MULTIPLE COPIES FEATURE ---
+            chkMulti = new CheckBox() { Text = "Deploy Multiple Copies", Location = new Point(18, 55), AutoSize = true, Font = new Font("Segoe UI", 9.5f, FontStyle.Bold), Checked = false };
+
+            cmbNewSep = new ComboBox() { Location = new Point(18, 85), Width = 85, Font = new Font("Segoe UI", 9f), DropDownStyle = ComboBoxStyle.DropDownList, Enabled = false };
+            EnsureDefaultSeparators();
+            cmbNewSep.Items.AddRange(File.ReadAllLines(separatorsFile));
+            if (cmbNewSep.Items.Count > 0) cmbNewSep.SelectedIndex = cmbNewSep.Items.Count > 2 ? 2 : 0;
+
+            cmbNewStyle = new ComboBox() { Location = new Point(110, 85), Width = 105, Font = new Font("Segoe UI", 9f), DropDownStyle = ComboBoxStyle.DropDownList, Enabled = false };
+            cmbNewStyle.Items.AddRange(new string[] { "1, 2, 3", "01, 02, 03", "I, II, III", "A, B, C", "a, b, c" });
+            cmbNewStyle.SelectedIndex = 1; // Default to Leading Zero
+
+            numNewEnd = new NumericUpDown() { Location = new Point(222, 85), Width = 70, Font = new Font("Segoe UI", 9f), Minimum = 2, Maximum = 999, Value = 5, Enabled = false };
+
+            chkMulti.CheckedChanged += (s, e) => {
+                cmbNewSep.Enabled = chkMulti.Checked;
+                cmbNewStyle.Enabled = chkMulti.Checked;
+                numNewEnd.Enabled = chkMulti.Checked;
+            };
+
+            this.Controls.AddRange(new Control[] { chkMulti, cmbNewSep, cmbNewStyle, numNewEnd });
+
             string[] templates = Directory.GetDirectories(templatesDir);
-            int yPos = 55;
+            int yPos = 125; // Shifted down for the multiple copies row
 
             if (templates.Length == 0)
             {
-                Label lblEmpty = new Label() { Text = "No templates found.\nUse 'Manage Templates' to add.", Location = new Point(18, 55), AutoSize = true, Font = new Font("Segoe UI", 10f) };
+                Label lblEmpty = new Label() { Text = "No templates found.\nClick the gear icon to add folders.", Location = new Point(18, yPos), AutoSize = true, Font = new Font("Segoe UI", 10f) };
                 this.Controls.Add(lblEmpty);
                 yPos += 50;
             }
@@ -371,12 +440,39 @@ namespace FolderPlus
                     string tName = new DirectoryInfo(tDir).Name;
                     Button btnT = new Button() { Text = "📁 " + tName, Location = new Point(18, yPos), Size = new Size(270, 45), Font = new Font("Segoe UI", 10.5f), FlatStyle = FlatStyle.Flat, TextAlign = ContentAlignment.MiddleLeft };
                     btnT.FlatAppearance.BorderColor = Color.LightGray;
+
                     btnT.Click += async (s, e) => {
+                        SaveCurrentState(); // Save inner fields before generating
+
                         btnT.Text = "Deploying..."; btnT.Enabled = false;
-                        await Task.Run(() => DeployTemplate(tDir));
-                        this.Hide();
-                        btnT.Text = "📁 " + tName; // Reset text for next use
-                        btnT.Enabled = true;
+
+                        bool isMulti = chkMulti.Checked;
+                        string sep = cmbNewSep.SelectedItem?.ToString() ?? "";
+                        if (sep == "None") sep = ""; else if (sep == "Space ( )") sep = " ";
+
+                        int styleIdx = cmbNewStyle.SelectedIndex + 1; // Maps 0-4 to 1-5 for GetFormattedMainNum
+                        int endCount = (int)numNewEnd.Value;
+
+                        await Task.Run(() => {
+                            if (!isMulti)
+                            {
+                                DeployTemplate(tDir, "");
+                            }
+                            else
+                            {
+                                for (int i = 1; i <= endCount; i++)
+                                {
+                                    string suffix = GetFormattedMainNum(i, styleIdx);
+                                    DeployTemplate(tDir, sep + suffix);
+                                }
+                            }
+                        });
+
+                        this.Invoke((MethodInvoker)delegate {
+                            this.Hide();
+                            btnT.Text = "📁 " + tName; // Reset text for next use
+                            btnT.Enabled = true;
+                        });
                     };
                     this.Controls.Add(btnT);
                     yPos += 52;
@@ -385,11 +481,13 @@ namespace FolderPlus
             this.ClientSize = new Size(310, yPos + 20);
         }
 
-        private void DeployTemplate(string sourceDir)
+        private void DeployTemplate(string sourceDir, string suffix)
         {
             try
             {
                 string dirName = new DirectoryInfo(sourceDir).Name;
+                if (!string.IsNullOrEmpty(suffix)) dirName += suffix;
+
                 string destDir = Path.Combine(targetPath, dirName);
                 CopyDirectoryRecursive(sourceDir, destDir);
             }
@@ -428,7 +526,7 @@ namespace FolderPlus
             pnlHamburger = new Panel() { Size = new Size(220, 240), Location = new Point(170, 50), BackColor = Color.White, BorderStyle = BorderStyle.FixedSingle, Visible = false };
             pnlHamburger.Controls.Add(CreateMenuButton("Bulk Import (CSV/TXT)", 0, (s, e) => HandleBulkImport()));
             pnlHamburger.Controls.Add(CreateMenuButton("Manage Templates (New+)", 48, (s, e) => Process.Start("explorer.exe", templatesDir)));
-            pnlHamburger.Controls.Add(CreateMenuButton("Manage Separators", 96, (s, e) => Process.Start("notepad.exe", separatorsFile)));
+            pnlHamburger.Controls.Add(CreateMenuButton("Manage Separators", 96, (s, e) => OpenSeparatorManager()));
             pnlHamburger.Controls.Add(CreateMenuButton("Shortcut Settings", 144, (s, e) => OpenShortcutSettings()));
             pnlHamburger.Controls.Add(CreateMenuButton("About Mitraphix", 192, (s, e) => ShowModernAbout()));
             this.Controls.Add(pnlHamburger);
@@ -510,9 +608,9 @@ namespace FolderPlus
         {
             Form aboutForm = new Form() { Text = "About Mitraphix Design", Size = new Size(380, 240), StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, BackColor = Color.White };
             Label lblTitle = new Label() { Text = "Mitraphix Folder+", Location = new Point(25, 20), AutoSize = true, Font = new Font("Segoe UI", 18f, FontStyle.Bold), ForeColor = brandBlue };
-            Label lblVersion = new Label() { Text = "Version 1.2.0 (Stable)", Location = new Point(28, 60), AutoSize = true, Font = new Font("Segoe UI", 10f), ForeColor = Color.Gray };
+            Label lblVersion = new Label() { Text = "Version 1.3.0 (Stable)", Location = new Point(28, 60), AutoSize = true, Font = new Font("Segoe UI", 10f), ForeColor = Color.Gray };
             Label lblDev = new Label() { Text = "Developed by Suman Mitra", Location = new Point(28, 140), AutoSize = true, Font = new Font("Segoe UI", 10.5f, FontStyle.Bold) };
-            Button btnClose = new Button() { Text = "Close", Location = new Point(240, 140), Size = new Size(100, 35), BackColor = brandBlue, ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 10f, FontStyle.Bold) };
+            Button btnClose = new Button() { Text = "CLOSE", Location = new Point(240, 140), Size = new Size(100, 35), BackColor = brandBlue, ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 10f, FontStyle.Bold) };
             btnClose.FlatAppearance.BorderSize = 0;
             btnClose.Click += (s, e) => aboutForm.Close();
             aboutForm.Controls.AddRange(new Control[] { lblTitle, lblVersion, lblDev, btnClose });
@@ -521,6 +619,77 @@ namespace FolderPlus
 
         private void EnsureDefaultSeparators() { if (!File.Exists(separatorsFile)) File.WriteAllLines(separatorsFile, defaultSeparators); }
         private void LoadSeparators() { cmbSep.Items.Clear(); EnsureDefaultSeparators(); cmbSep.Items.AddRange(File.ReadAllLines(separatorsFile)); if (cmbSep.Items.Count > 0) cmbSep.SelectedIndex = 2 < cmbSep.Items.Count ? 2 : 0; }
+
+        private void OpenSeparatorManager()
+        {
+            Form editorForm = new Form()
+            {
+                Text = "Manage Separators",
+                Size = new Size(350, 420),
+                StartPosition = FormStartPosition.CenterParent,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                MaximizeBox = false,
+                BackColor = Color.White
+            };
+
+            Label lblHint = new Label()
+            {
+                Text = "Edit separators (one per line).\nChanges are saved automatically on close.",
+                Location = new Point(18, 15),
+                AutoSize = true,
+                Font = new Font("Segoe UI", 9.5f, FontStyle.Italic),
+                ForeColor = Color.Gray
+            };
+
+            TextBox txtEditor = new TextBox()
+            {
+                Location = new Point(18, 60),
+                Size = new Size(295, 240),
+                Multiline = true,
+                ScrollBars = ScrollBars.Vertical,
+                Font = new Font("Segoe UI", 11f)
+            };
+
+            if (File.Exists(separatorsFile))
+                txtEditor.Text = File.ReadAllText(separatorsFile);
+            else
+                txtEditor.Text = string.Join(Environment.NewLine, defaultSeparators);
+
+            editorForm.Shown += (s, e) => {
+                txtEditor.SelectionStart = txtEditor.Text.Length;
+                txtEditor.SelectionLength = 0;
+                txtEditor.ScrollToCaret();
+            };
+
+            Button btnClose = new Button()
+            {
+                Text = "SAVE && CLOSE",
+                Location = new Point(18, 315),
+                Size = new Size(295, 45),
+                BackColor = brandBlue,
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font("Segoe UI", 10.5f, FontStyle.Bold)
+            };
+            btnClose.FlatAppearance.BorderSize = 0;
+            btnClose.Click += (s, e) => editorForm.Close();
+
+            editorForm.FormClosing += (s, e) => {
+                string updatedText = txtEditor.Text.Trim();
+                if (!string.IsNullOrWhiteSpace(updatedText))
+                {
+                    File.WriteAllText(separatorsFile, updatedText);
+                }
+                else
+                {
+                    File.WriteAllLines(separatorsFile, defaultSeparators);
+                }
+                LoadSeparators(); // Instantly refresh the main UI
+            };
+
+            editorForm.Controls.AddRange(new Control[] { lblHint, txtEditor, btnClose });
+            editorForm.ShowDialog();
+        }
 
         private async void HandleBulkImport()
         {
@@ -612,7 +781,7 @@ namespace FolderPlus
             if (idx == 0) return "";
             string n = (idx > 3) ? i.ToString("D2") : i.ToString();
             if (text.Contains("()")) return $"({n}) ";
-            if (text.Contains(")")) return $"{n}) ";
+            if (text.Contains(")")) return $"({n}) ";
             return $"{n}. ";
         }
 
