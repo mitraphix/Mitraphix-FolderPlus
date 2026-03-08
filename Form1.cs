@@ -1,13 +1,28 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace FolderPlus
 {
     public partial class Form1 : Form
     {
+        // Win32 API for Hotkeys
+        [DllImport("user32.dll")]
+        public static extern bool RegisterHotKey(IntPtr hWnd, int id, int fsModifiers, int vlc);
+        [DllImport("user32.dll")]
+        public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+        // Win32 API for Context Awareness (Explorer only)
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
         private string targetPath = "";
         private bool isNewPlusMode = false;
         private Color brandBlue = Color.FromArgb(0, 120, 215);
@@ -15,21 +30,37 @@ namespace FolderPlus
         private string appDataPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Mitraphix");
         private string templatesDir;
         private string separatorsFile;
+        private string settingsFile;
+        private string hotkeyFile;
         private readonly string[] defaultSeparators = { "None", "Space ( )", "_", "-", ".", "+", "@", "#" };
 
         private TextBox txtNames;
         private ComboBox cmbSep, cmbStyle, cmbPreNum;
         private NumericUpDown numStart, numEnd;
         private Panel pnlHamburger;
+        private NotifyIcon trayIcon;
+
+        // Dynamic Hotkey Variables
+        private int hk1Mod = 6;
+        private Keys hk1Key = Keys.F;
+        private int hk2Mod = 6;
+        private Keys hk2Key = Keys.D;
+
+        private bool hasShownTrayNotification = false;
+        private bool hotkeysRegistered = false;
+        private Timer contextTimer;
 
         public Form1(bool newPlusMode = false)
         {
             isNewPlusMode = newPlusMode;
             templatesDir = Path.Combine(appDataPath, "Templates");
             separatorsFile = Path.Combine(appDataPath, "separators.txt");
+            settingsFile = Path.Combine(appDataPath, "state.txt");
+            hotkeyFile = Path.Combine(appDataPath, "hotkeys.txt");
 
             if (!Directory.Exists(templatesDir)) Directory.CreateDirectory(templatesDir);
             EnsureDefaultSeparators();
+            LoadHotkeys();
 
             InitializeComponent();
             DetectContextPath();
@@ -39,7 +70,158 @@ namespace FolderPlus
             else SetupMitraphixUI();
             this.ResumeLayout(false);
 
+            SetupSystemTray();
+            InitializeContextTimer();
+
+            this.Load += (s, e) => LoadLastState();
+            this.FormClosing += HandleFormClosing;
             this.Click += (s, e) => { if (pnlHamburger != null) pnlHamburger.Visible = false; };
+        }
+
+        // --- CONTEXT-AWARE SHORTCUT ENGINE ---
+        private void InitializeContextTimer()
+        {
+            contextTimer = new Timer();
+            contextTimer.Interval = 500; // Check active window every 500ms
+            contextTimer.Tick += ContextTimer_Tick;
+            contextTimer.Start();
+        }
+
+        private void ContextTimer_Tick(object sender, EventArgs e)
+        {
+            if (IsExplorerActive())
+            {
+                if (!hotkeysRegistered)
+                {
+                    RegisterShortcuts();
+                    hotkeysRegistered = true;
+                }
+            }
+            else
+            {
+                if (hotkeysRegistered)
+                {
+                    UnregisterShortcuts();
+                    hotkeysRegistered = false;
+                }
+            }
+        }
+
+        private bool IsExplorerActive()
+        {
+            IntPtr hWnd = GetForegroundWindow();
+            if (hWnd == IntPtr.Zero) return false;
+
+            GetWindowThreadProcessId(hWnd, out uint processId);
+            try
+            {
+                Process proc = Process.GetProcessById((int)processId);
+                return proc.ProcessName.ToLower() == "explorer";
+            }
+            catch { return false; }
+        }
+
+        private void LoadHotkeys()
+        {
+            if (File.Exists(hotkeyFile))
+            {
+                try
+                {
+                    string[] lines = File.ReadAllLines(hotkeyFile);
+                    if (lines.Length >= 4)
+                    {
+                        hk1Mod = int.Parse(lines[0]);
+                        Enum.TryParse(lines[1], out hk1Key);
+                        hk2Mod = int.Parse(lines[2]);
+                        Enum.TryParse(lines[3], out hk2Key);
+                    }
+                }
+                catch { /* Fallback to defaults */ }
+            }
+        }
+
+        private void SaveAndApplyHotkeys(int mod1, Keys key1, int mod2, Keys key2)
+        {
+            hk1Mod = mod1; hk1Key = key1;
+            hk2Mod = mod2; hk2Key = key2;
+            File.WriteAllLines(hotkeyFile, new string[] { mod1.ToString(), key1.ToString(), mod2.ToString(), key2.ToString() });
+
+            UnregisterShortcuts();
+            hotkeysRegistered = false;
+            // Timer will auto-register them if Explorer is active
+        }
+
+        private void RegisterShortcuts()
+        {
+            RegisterHotKey(this.Handle, 1, hk1Mod, (int)hk1Key);
+            RegisterHotKey(this.Handle, 2, hk2Mod, (int)hk2Key);
+        }
+
+        private void UnregisterShortcuts()
+        {
+            UnregisterHotKey(this.Handle, 1);
+            UnregisterHotKey(this.Handle, 2);
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == 0x0312) // WM_HOTKEY
+            {
+                int id = m.WParam.ToInt32();
+                if (id == 1) { isNewPlusMode = false; ShowApp(); }
+                if (id == 2) { isNewPlusMode = true; ShowApp(); }
+            }
+            base.WndProc(ref m);
+        }
+
+        // --- SYSTEM TRAY & PERSISTENCE ---
+        private void HandleFormClosing(object sender, FormClosingEventArgs e)
+        {
+            SaveCurrentState();
+            if (e.CloseReason == CloseReason.UserClosing)
+            {
+                e.Cancel = true;
+                this.Hide();
+
+                // Show notification only once per session
+                if (!hasShownTrayNotification)
+                {
+                    trayIcon.ShowBalloonTip(2000, "Mitraphix Folder+", "Running in background to listen for shortcuts.", ToolTipIcon.Info);
+                    hasShownTrayNotification = true;
+                }
+            }
+            else
+            {
+                UnregisterShortcuts();
+            }
+        }
+
+        private void SetupSystemTray()
+        {
+            trayIcon = new NotifyIcon();
+            trayIcon.Icon = File.Exists(logoPath) ? new Icon(logoPath) : SystemIcons.Application;
+            trayIcon.Text = "Mitraphix Folder+";
+            trayIcon.Visible = true;
+
+            ContextMenu menu = new ContextMenu();
+            menu.MenuItems.Add("Open Folder+", (s, e) => { isNewPlusMode = false; ShowApp(); });
+            menu.MenuItems.Add("Open New+", (s, e) => { isNewPlusMode = true; ShowApp(); });
+            menu.MenuItems.Add("-");
+            menu.MenuItems.Add("Exit Completely", (s, e) => { trayIcon.Visible = false; Application.Exit(); });
+            trayIcon.ContextMenu = menu;
+            trayIcon.DoubleClick += (s, e) => ShowApp();
+        }
+
+        private void ShowApp()
+        {
+            this.Controls.Clear();
+            if (isNewPlusMode) SetupNewPlusUI();
+            else SetupMitraphixUI();
+            LoadLastState();
+            this.Show();
+            this.WindowState = FormWindowState.Normal;
+            this.BringToFront();
+            this.Activate();
         }
 
         private void DetectContextPath()
@@ -63,7 +245,105 @@ namespace FolderPlus
             catch { targetPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop); }
         }
 
-        // --- MITRAPHIX NEW+ ENGINE ---
+        private void LoadLastState()
+        {
+            if (File.Exists(settingsFile) && !isNewPlusMode)
+            {
+                try
+                {
+                    string[] lines = File.ReadAllLines(settingsFile);
+                    if (lines.Length >= 6)
+                    {
+                        cmbPreNum.SelectedIndex = int.Parse(lines[0]);
+                        txtNames.Text = lines[1];
+                        cmbSep.SelectedIndex = int.Parse(lines[2]);
+                        cmbStyle.SelectedIndex = int.Parse(lines[3]);
+                        numStart.Value = decimal.Parse(lines[4]);
+                        numEnd.Value = decimal.Parse(lines[5]);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        private void SaveCurrentState()
+        {
+            if (!isNewPlusMode && txtNames != null)
+            {
+                string[] state = {
+                    cmbPreNum.SelectedIndex.ToString(),
+                    txtNames.Text,
+                    cmbSep.SelectedIndex.ToString(),
+                    cmbStyle.SelectedIndex.ToString(),
+                    numStart.Value.ToString(),
+                    numEnd.Value.ToString()
+                };
+                File.WriteAllLines(settingsFile, state);
+            }
+        }
+
+        // --- SHORTCUT SETTINGS UI ---
+        private int GetWin32Modifier(Keys modifiers)
+        {
+            int win32Mod = 0;
+            if ((modifiers & Keys.Control) == Keys.Control) win32Mod |= 0x0002;
+            if ((modifiers & Keys.Alt) == Keys.Alt) win32Mod |= 0x0001;
+            if ((modifiers & Keys.Shift) == Keys.Shift) win32Mod |= 0x0004;
+            return win32Mod;
+        }
+
+        private string FormatShortcut(int win32Mod, Keys key)
+        {
+            List<string> parts = new List<string>();
+            if ((win32Mod & 0x0002) != 0) parts.Add("Ctrl");
+            if ((win32Mod & 0x0001) != 0) parts.Add("Alt");
+            if ((win32Mod & 0x0004) != 0) parts.Add("Shift");
+            parts.Add(key.ToString());
+            return string.Join(" + ", parts);
+        }
+
+        private void OpenShortcutSettings()
+        {
+            Form hkForm = new Form() { Text = "Global Shortcuts", Size = new Size(360, 260), StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, BackColor = Color.White };
+
+            int temp1Mod = hk1Mod; Keys temp1Key = hk1Key;
+            int temp2Mod = hk2Mod; Keys temp2Key = hk2Key;
+
+            Label lblHint = new Label() { Text = "Click a box and press your preferred shortcut.", Location = new Point(20, 15), AutoSize = true, Font = new Font("Segoe UI", 9f, FontStyle.Italic), ForeColor = Color.Gray };
+
+            Label lblFPlus = new Label() { Text = "Folder+ Shortcut:", Location = new Point(20, 50), AutoSize = true, Font = new Font("Segoe UI Semibold", 10f) };
+            TextBox txtFPlus = new TextBox() { Location = new Point(160, 48), Width = 150, Font = new Font("Segoe UI", 10f), ReadOnly = true, BackColor = Color.White, Cursor = Cursors.Hand, Text = FormatShortcut(hk1Mod, hk1Key) };
+
+            Label lblNPlus = new Label() { Text = "New+ Shortcut:", Location = new Point(20, 90), AutoSize = true, Font = new Font("Segoe UI Semibold", 10f) };
+            TextBox txtNPlus = new TextBox() { Location = new Point(160, 88), Width = 150, Font = new Font("Segoe UI", 10f), ReadOnly = true, BackColor = Color.White, Cursor = Cursors.Hand, Text = FormatShortcut(hk2Mod, hk2Key) };
+
+            KeyEventHandler captureKey = (s, e) => {
+                e.SuppressKeyPress = true;
+                if (e.KeyCode == Keys.ControlKey || e.KeyCode == Keys.ShiftKey || e.KeyCode == Keys.Menu) return;
+                int winMod = GetWin32Modifier(e.Modifiers);
+                if (winMod == 0) { MessageBox.Show("Please include at least one modifier (Ctrl, Alt, or Shift).", "Mitraphix"); return; }
+
+                TextBox tb = (TextBox)s;
+                if (tb == txtFPlus) { temp1Mod = winMod; temp1Key = e.KeyCode; tb.Text = FormatShortcut(temp1Mod, temp1Key); }
+                else { temp2Mod = winMod; temp2Key = e.KeyCode; tb.Text = FormatShortcut(temp2Mod, temp2Key); }
+            };
+
+            txtFPlus.KeyDown += captureKey;
+            txtNPlus.KeyDown += captureKey;
+
+            Button btnSave = new Button() { Text = "Save & Apply", Location = new Point(20, 145), Size = new Size(290, 45), BackColor = brandBlue, ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 10f, FontStyle.Bold) };
+            btnSave.FlatAppearance.BorderSize = 0;
+            btnSave.Click += (s, e) => {
+                SaveAndApplyHotkeys(temp1Mod, temp1Key, temp2Mod, temp2Key);
+                MessageBox.Show("Shortcuts updated successfully.", "Mitraphix");
+                hkForm.Close();
+            };
+
+            hkForm.Controls.AddRange(new Control[] { lblHint, lblFPlus, txtFPlus, lblNPlus, txtNPlus, btnSave });
+            hkForm.ShowDialog();
+        }
+
+        // --- CORE UI GENERATION ---
         private void SetupNewPlusUI()
         {
             this.Text = "Mitraphix New+";
@@ -80,7 +360,7 @@ namespace FolderPlus
 
             if (templates.Length == 0)
             {
-                Label lblEmpty = new Label() { Text = "No templates found.\nUse 'Manage Templates' in Folder+ to add.", Location = new Point(18, 55), AutoSize = true, Font = new Font("Segoe UI", 10f) };
+                Label lblEmpty = new Label() { Text = "No templates found.\nUse 'Manage Templates' to add.", Location = new Point(18, 55), AutoSize = true, Font = new Font("Segoe UI", 10f) };
                 this.Controls.Add(lblEmpty);
                 yPos += 50;
             }
@@ -91,7 +371,13 @@ namespace FolderPlus
                     string tName = new DirectoryInfo(tDir).Name;
                     Button btnT = new Button() { Text = "📁 " + tName, Location = new Point(18, yPos), Size = new Size(270, 45), Font = new Font("Segoe UI", 10.5f), FlatStyle = FlatStyle.Flat, TextAlign = ContentAlignment.MiddleLeft };
                     btnT.FlatAppearance.BorderColor = Color.LightGray;
-                    btnT.Click += (s, e) => DeployTemplate(tDir);
+                    btnT.Click += async (s, e) => {
+                        btnT.Text = "Deploying..."; btnT.Enabled = false;
+                        await Task.Run(() => DeployTemplate(tDir));
+                        this.Hide();
+                        btnT.Text = "📁 " + tName; // Reset text for next use
+                        btnT.Enabled = true;
+                    };
                     this.Controls.Add(btnT);
                     yPos += 52;
                 }
@@ -106,9 +392,11 @@ namespace FolderPlus
                 string dirName = new DirectoryInfo(sourceDir).Name;
                 string destDir = Path.Combine(targetPath, dirName);
                 CopyDirectoryRecursive(sourceDir, destDir);
-                Application.Exit();
             }
-            catch (Exception ex) { MessageBox.Show("Deployment Error:\n" + ex.Message, "Error"); }
+            catch (Exception ex)
+            {
+                this.Invoke((MethodInvoker)delegate { MessageBox.Show("Deployment Error:\n" + ex.Message, "Error"); });
+            }
         }
 
         private void CopyDirectoryRecursive(string source, string target)
@@ -120,7 +408,6 @@ namespace FolderPlus
                 CopyDirectoryRecursive(dir, Path.Combine(target, Path.GetFileName(dir)));
         }
 
-        // --- MAIN FOLDER+ ENGINE ---
         private void SetupMitraphixUI()
         {
             this.Text = "Mitraphix Folder+";
@@ -130,7 +417,6 @@ namespace FolderPlus
             this.MaximizeBox = false;
             this.BackColor = Color.White;
 
-            // Scaled Fonts
             Font inputFont = new Font("Segoe UI Semibold", 11.5f);
             Font btnFont = new Font("Segoe UI", 12f, FontStyle.Bold);
 
@@ -139,11 +425,12 @@ namespace FolderPlus
             btnHam.Click += (s, e) => { pnlHamburger.Visible = !pnlHamburger.Visible; if (pnlHamburger.Visible) pnlHamburger.BringToFront(); };
             this.Controls.Add(btnHam);
 
-            pnlHamburger = new Panel() { Size = new Size(220, 195), Location = new Point(170, 50), BackColor = Color.White, BorderStyle = BorderStyle.FixedSingle, Visible = false };
+            pnlHamburger = new Panel() { Size = new Size(220, 240), Location = new Point(170, 50), BackColor = Color.White, BorderStyle = BorderStyle.FixedSingle, Visible = false };
             pnlHamburger.Controls.Add(CreateMenuButton("Bulk Import (CSV/TXT)", 0, (s, e) => HandleBulkImport()));
-            pnlHamburger.Controls.Add(CreateMenuButton("Manage Templates (New+)", 48, (s, e) => System.Diagnostics.Process.Start("explorer.exe", templatesDir)));
-            pnlHamburger.Controls.Add(CreateMenuButton("Manage Separators", 96, (s, e) => OpenSeparatorManager()));
-            pnlHamburger.Controls.Add(CreateMenuButton("About Mitraphix", 144, (s, e) => ShowModernAbout()));
+            pnlHamburger.Controls.Add(CreateMenuButton("Manage Templates (New+)", 48, (s, e) => Process.Start("explorer.exe", templatesDir)));
+            pnlHamburger.Controls.Add(CreateMenuButton("Manage Separators", 96, (s, e) => Process.Start("notepad.exe", separatorsFile)));
+            pnlHamburger.Controls.Add(CreateMenuButton("Shortcut Settings", 144, (s, e) => OpenShortcutSettings()));
+            pnlHamburger.Controls.Add(CreateMenuButton("About Mitraphix", 192, (s, e) => ShowModernAbout()));
             this.Controls.Add(pnlHamburger);
 
             int lblX = 25; int inputX = 155; int inputW = 215; int startY = 70; int spacing = 54;
@@ -157,7 +444,8 @@ namespace FolderPlus
             AddLabel("Folder Name:", lblX, startY + spacing + 4, 10.5f);
             txtNames = new TextBox() { Location = new Point(inputX, startY + spacing), Width = inputW, Font = inputFont };
             this.Controls.Add(txtNames);
-            AddLabel("(Comma separated)", lblX, startY + spacing + 24, 8.5f, Color.Gray);
+
+            AddLabel("(Comma separated)", inputX, startY + spacing + 28, 8.5f, Color.Gray);
 
             AddLabel("Separator:", lblX, startY + spacing * 2 + 4, 10.5f);
             cmbSep = new ComboBox() { Location = new Point(inputX, startY + spacing * 2), Width = inputW, Font = inputFont, DropDownStyle = ComboBoxStyle.DropDownList };
@@ -178,7 +466,15 @@ namespace FolderPlus
 
             Button btnGen = new Button() { Text = "GENERATE FOLDERS", Location = new Point(lblX, startY + spacing * 5 + 15), Size = new Size(345, 60), Font = btnFont, BackColor = brandBlue, ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
             btnGen.FlatAppearance.BorderSize = 0;
-            btnGen.Click += (s, e) => RunGeneration();
+            btnGen.Click += async (s, e) => {
+                SaveCurrentState(); // Save state immediately before generating
+                btnGen.Text = "GENERATING...";
+                btnGen.Enabled = false;
+                await Task.Run(() => RunGeneration());
+                this.Hide();
+                btnGen.Text = "GENERATE FOLDERS"; // Reset button text for next use
+                btnGen.Enabled = true;
+            };
             this.Controls.Add(btnGen);
 
             this.ClientSize = new Size(400, btnGen.Bottom + 30);
@@ -213,202 +509,116 @@ namespace FolderPlus
         private void ShowModernAbout()
         {
             Form aboutForm = new Form() { Text = "About Mitraphix Design", Size = new Size(380, 240), StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, BackColor = Color.White };
-
             Label lblTitle = new Label() { Text = "Mitraphix Folder+", Location = new Point(25, 20), AutoSize = true, Font = new Font("Segoe UI", 18f, FontStyle.Bold), ForeColor = brandBlue };
-            Label lblVersion = new Label() { Text = "Version 1.0.0", Location = new Point(28, 60), AutoSize = true, Font = new Font("Segoe UI", 10f), ForeColor = Color.Gray };
-            Label lblDesc = new Label() { Text = "Professional automation tool for designers.\nEngineered for precision and speed.", Location = new Point(28, 90), AutoSize = true, Font = new Font("Segoe UI", 10.5f) };
+            Label lblVersion = new Label() { Text = "Version 1.2.0 (Stable)", Location = new Point(28, 60), AutoSize = true, Font = new Font("Segoe UI", 10f), ForeColor = Color.Gray };
             Label lblDev = new Label() { Text = "Developed by Suman Mitra", Location = new Point(28, 140), AutoSize = true, Font = new Font("Segoe UI", 10.5f, FontStyle.Bold) };
-
             Button btnClose = new Button() { Text = "Close", Location = new Point(240, 140), Size = new Size(100, 35), BackColor = brandBlue, ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 10f, FontStyle.Bold) };
             btnClose.FlatAppearance.BorderSize = 0;
             btnClose.Click += (s, e) => aboutForm.Close();
-
-            aboutForm.Controls.AddRange(new Control[] { lblTitle, lblVersion, lblDesc, lblDev, btnClose });
+            aboutForm.Controls.AddRange(new Control[] { lblTitle, lblVersion, lblDev, btnClose });
             aboutForm.ShowDialog();
         }
 
-        // --- DYNAMIC SEPARATOR MANAGER ---
-        private void EnsureDefaultSeparators()
+        private void EnsureDefaultSeparators() { if (!File.Exists(separatorsFile)) File.WriteAllLines(separatorsFile, defaultSeparators); }
+        private void LoadSeparators() { cmbSep.Items.Clear(); EnsureDefaultSeparators(); cmbSep.Items.AddRange(File.ReadAllLines(separatorsFile)); if (cmbSep.Items.Count > 0) cmbSep.SelectedIndex = 2 < cmbSep.Items.Count ? 2 : 0; }
+
+        private async void HandleBulkImport()
         {
-            if (!File.Exists(separatorsFile))
-            {
-                File.WriteAllLines(separatorsFile, defaultSeparators);
-            }
-        }
-
-        private void LoadSeparators()
-        {
-            cmbSep.Items.Clear();
-            EnsureDefaultSeparators();
-            cmbSep.Items.AddRange(File.ReadAllLines(separatorsFile));
-            if (cmbSep.Items.Count > 0) cmbSep.SelectedIndex = 2 < cmbSep.Items.Count ? 2 : 0;
-        }
-
-        private void OpenSeparatorManager()
-        {
-            Form sepForm = new Form() { Text = "Manage Separators", Size = new Size(420, 420), StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, BackColor = Color.White };
-
-            ListBox lstSeps = new ListBox() { Location = new Point(20, 20), Size = new Size(220, 260), AllowDrop = true, Font = new Font("Segoe UI", 11f) };
-            lstSeps.Items.AddRange(File.ReadAllLines(separatorsFile));
-
-            TextBox txtInput = new TextBox() { Location = new Point(255, 20), Size = new Size(130, 27), Font = new Font("Segoe UI", 11f) };
-            Button btnAdd = new Button() { Text = "Add", Location = new Point(255, 55), Size = new Size(130, 32), FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 10f) };
-            Button btnRemove = new Button() { Text = "Remove", Location = new Point(255, 95), Size = new Size(130, 32), FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 10f) };
-            Button btnRestore = new Button() { Text = "Restore Defaults", Location = new Point(255, 135), Size = new Size(130, 32), FlatStyle = FlatStyle.Flat, ForeColor = brandBlue, Font = new Font("Segoe UI", 9.5f, FontStyle.Bold) };
-
-            Label lblHint = new Label() { Text = "💡 Drag items to reorder them.", Location = new Point(18, 285), AutoSize = true, ForeColor = Color.Gray, Font = new Font("Segoe UI", 9.5f) };
-
-            Button btnUp = new Button() { Text = "Move Up ▲", Location = new Point(255, 205), Size = new Size(130, 32), FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 10f) };
-            Button btnDown = new Button() { Text = "Move Down ▼", Location = new Point(255, 245), Size = new Size(130, 32), FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 10f) };
-
-            Button btnClose = new Button() { Text = "CLOSE", Location = new Point(20, 315), Size = new Size(365, 45), BackColor = brandBlue, ForeColor = Color.White, FlatStyle = FlatStyle.Flat, Font = new Font("Segoe UI", 11f, FontStyle.Bold) };
-            btnClose.FlatAppearance.BorderSize = 0;
-
-            Action SaveListToFile = () => {
-                string[] newSeps = new string[lstSeps.Items.Count];
-                lstSeps.Items.CopyTo(newSeps, 0);
-                File.WriteAllLines(separatorsFile, newSeps);
-                LoadSeparators();
-            };
-
-            lstSeps.SelectedIndexChanged += (s, e) => { if (lstSeps.SelectedIndex >= 0) txtInput.Text = lstSeps.SelectedItem.ToString(); };
-
-            btnAdd.Click += (s, e) => {
-                if (!string.IsNullOrWhiteSpace(txtInput.Text))
-                {
-                    lstSeps.Items.Add(txtInput.Text);
-                    txtInput.Clear();
-                    SaveListToFile();
-                }
-            };
-
-            btnRemove.Click += (s, e) => {
-                if (lstSeps.SelectedIndex >= 0)
-                {
-                    txtInput.Clear();
-                    lstSeps.Items.RemoveAt(lstSeps.SelectedIndex);
-                    SaveListToFile();
-                }
-            };
-
-            btnRestore.Click += (s, e) => {
-                if (MessageBox.Show("This will reset your list to the Mitraphix defaults. Continue?", "Restore Defaults", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
-                {
-                    File.WriteAllLines(separatorsFile, defaultSeparators);
-                    lstSeps.Items.Clear();
-                    lstSeps.Items.AddRange(defaultSeparators);
-                    txtInput.Clear();
-                    LoadSeparators();
-                }
-            };
-
-            btnUp.Click += (s, e) => {
-                if (lstSeps.SelectedIndex > 0)
-                {
-                    int i = lstSeps.SelectedIndex; object item = lstSeps.Items[i];
-                    lstSeps.Items.RemoveAt(i); lstSeps.Items.Insert(i - 1, item); lstSeps.SelectedIndex = i - 1;
-                    SaveListToFile();
-                }
-            };
-
-            btnDown.Click += (s, e) => {
-                if (lstSeps.SelectedIndex >= 0 && lstSeps.SelectedIndex < lstSeps.Items.Count - 1)
-                {
-                    int i = lstSeps.SelectedIndex; object item = lstSeps.Items[i];
-                    lstSeps.Items.RemoveAt(i); lstSeps.Items.Insert(i + 1, item); lstSeps.SelectedIndex = i + 1;
-                    SaveListToFile();
-                }
-            };
-
-            lstSeps.MouseDown += (s, e) => { if (lstSeps.SelectedItem != null) lstSeps.DoDragDrop(lstSeps.SelectedItem, DragDropEffects.Move); };
-            lstSeps.DragOver += (s, e) => { e.Effect = DragDropEffects.Move; };
-            lstSeps.DragDrop += (s, e) => {
-                Point point = lstSeps.PointToClient(new Point(e.X, e.Y));
-                int index = lstSeps.IndexFromPoint(point);
-                if (index < 0) index = lstSeps.Items.Count - 1;
-                string data = (string)e.Data.GetData(typeof(string));
-                if (data != null)
-                {
-                    lstSeps.Items.Remove(data);
-                    lstSeps.Items.Insert(index, data);
-                    lstSeps.SelectedIndex = index;
-                    SaveListToFile();
-                }
-            };
-
-            btnClose.Click += (s, e) => { sepForm.Close(); };
-
-            sepForm.Controls.AddRange(new Control[] { lstSeps, txtInput, btnAdd, btnRemove, btnRestore, lblHint, btnUp, btnDown, btnClose });
-            sepForm.ShowDialog();
-        }
-
-        private void HandleBulkImport()
-        {
-            using (OpenFileDialog ofd = new OpenFileDialog() { Filter = "Text Files|*.txt|CSV Files|*.csv" })
+            using (OpenFileDialog ofd = new OpenFileDialog() { Filter = "Text/CSV Files|*.txt;*.csv" })
             {
                 if (ofd.ShowDialog() == DialogResult.OK)
                 {
-                    var lines = File.ReadAllLines(ofd.FileName);
-                    foreach (var line in lines) { if (!string.IsNullOrWhiteSpace(line)) Directory.CreateDirectory(Path.Combine(targetPath, line.Trim())); }
-                    MessageBox.Show("Folders Created Successfully.", "Mitraphix");
+                    string file = ofd.FileName;
+                    await Task.Run(() =>
+                    {
+                        try
+                        {
+                            var lines = File.ReadAllLines(file);
+                            foreach (var line in lines)
+                            {
+                                string sanitized = SanitizeFolderName(line.Trim());
+                                if (!string.IsNullOrWhiteSpace(sanitized))
+                                    Directory.CreateDirectory(Path.Combine(targetPath, sanitized));
+                            }
+                            this.Invoke((MethodInvoker)delegate { MessageBox.Show("Bulk Import Completed Successfully.", "Mitraphix"); });
+                        }
+                        catch (Exception ex)
+                        {
+                            this.Invoke((MethodInvoker)delegate { MessageBox.Show("Import Error:\n" + ex.Message, "Error"); });
+                        }
+                    });
+                    this.Hide();
                 }
             }
+        }
+
+        private string SanitizeFolderName(string name)
+        {
+            string invalid = new string(Path.GetInvalidFileNameChars()) + new string(Path.GetInvalidPathChars());
+            foreach (char c in invalid) name = name.Replace(c.ToString(), "");
+            return name;
         }
 
         private void RunGeneration()
         {
-            string[] names = txtNames.Text.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
-            if (names.Length == 0) { MessageBox.Show("Please enter at least one folder name.", "Notice"); return; }
+            string rawText = ""; string sep = ""; int styleIdx = 0; int preIdx = 0; string preText = "";
+            int startVal = 1; int endVal = 5;
 
-            string sep = cmbSep.SelectedItem.ToString();
-            if (sep == "None") sep = "";
-            else if (sep == "Space ( )") sep = " ";
+            this.Invoke((MethodInvoker)delegate {
+                rawText = txtNames.Text;
+                sep = cmbSep.SelectedItem.ToString();
+                styleIdx = cmbStyle.SelectedIndex;
+                preIdx = cmbPreNum.SelectedIndex;
+                preText = cmbPreNum.Text;
+                startVal = (int)numStart.Value;
+                endVal = (int)numEnd.Value;
+            });
+
+            string[] names = rawText.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+            if (names.Length == 0) return;
+            if (sep == "None") sep = ""; else if (sep == "Space ( )") sep = " ";
 
             try
             {
                 foreach (string rawName in names)
                 {
-                    string baseName = rawName.Trim();
-                    if (cmbStyle.SelectedIndex == 0)
+                    string baseName = SanitizeFolderName(rawName.Trim());
+                    if (string.IsNullOrWhiteSpace(baseName)) continue;
+
+                    if (styleIdx == 0)
                     {
                         Directory.CreateDirectory(Path.Combine(targetPath, baseName));
                     }
                     else
                     {
-                        for (int i = (int)numStart.Value; i <= (int)numEnd.Value; i++)
+                        for (int i = startVal; i <= endVal; i++)
                         {
-                            string pre = GetFormattedPreNum(i);
-                            string mainNum = GetFormattedMainNum(i);
+                            string pre = GetFormattedPreNum(i, preIdx, preText);
+                            string mainNum = GetFormattedMainNum(i, styleIdx);
                             string fName = (pre + baseName + sep + mainNum).Trim();
                             Directory.CreateDirectory(Path.Combine(targetPath, fName));
                         }
                     }
                 }
-                Application.Exit();
             }
-            catch (Exception ex) { MessageBox.Show("Error:\n" + ex.Message, "Mitraphix Error"); }
+            catch (Exception ex)
+            {
+                this.Invoke((MethodInvoker)delegate { MessageBox.Show("Error:\n" + ex.Message, "Mitraphix Error"); });
+            }
         }
 
-        private string GetFormattedPreNum(int i)
+        private string GetFormattedPreNum(int i, int idx, string text)
         {
-            if (cmbPreNum.SelectedIndex == 0) return "";
-            string n = (cmbPreNum.SelectedIndex > 3) ? i.ToString("D2") : i.ToString();
-            if (cmbPreNum.Text.Contains("()")) return $"({n}) ";
-            if (cmbPreNum.Text.Contains(")")) return $"{n}) ";
+            if (idx == 0) return "";
+            string n = (idx > 3) ? i.ToString("D2") : i.ToString();
+            if (text.Contains("()")) return $"({n}) ";
+            if (text.Contains(")")) return $"{n}) ";
             return $"{n}. ";
         }
 
-        private string GetFormattedMainNum(int i)
+        private string GetFormattedMainNum(int i, int styleIdx)
         {
-            switch (cmbStyle.SelectedIndex)
-            {
-                case 1: return i.ToString();
-                case 2: return i.ToString("D2");
-                case 3: return ToRoman(i);
-                case 4: return ((char)(64 + i)).ToString();
-                case 5: return ((char)(96 + i)).ToString();
-                default: return "";
-            }
+            switch (styleIdx) { case 1: return i.ToString(); case 2: return i.ToString("D2"); case 3: return ToRoman(i); case 4: return ((char)(64 + i)).ToString(); case 5: return ((char)(96 + i)).ToString(); default: return ""; }
         }
 
         private string ToRoman(int n)
