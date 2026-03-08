@@ -67,3 +67,10 @@ Mitraphix Design is committed to delivering high-quality visual communication an
 ## 📄 License
 
 This project is completely free and open-source. Built for professionals across all industries to speed up their workflow.
+
+---
+
+## ❤️ Support the Project
+If **Mitraphix Folder+** saves you time and speeds up your workflow, consider supporting its development! Your contributions help me keep the project open-source and bring new features.
+
+[**Donate via PayPal**](https://paypal.me/mitraphix)
