@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -23,8 +24,12 @@ namespace FolderPlus
         [DllImport("user32.dll")]
         private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
+        // Single Instance Mutex
+        private static Mutex appMutex = null;
+
         private string targetPath = "";
         private bool isNewPlusMode = false;
+        private bool startMinimized = false;
         private Color brandBlue = Color.FromArgb(0, 120, 215);
         private string logoPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logo.ico");
         private string appDataPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Mitraphix");
@@ -56,10 +61,19 @@ namespace FolderPlus
 
         private bool hasShownTrayNotification = false;
         private bool hotkeysRegistered = false;
-        private Timer contextTimer;
+        private System.Windows.Forms.Timer contextTimer; // Explicit namespace to fix Ambiguous Reference
 
         public Form1(bool newPlusMode = false)
         {
+            // --- SINGLE INSTANCE CHECK ---
+            bool createdNew;
+            appMutex = new Mutex(true, "MitraphixFolderPlus_SingleInstance_Mutex", out createdNew);
+            if (!createdNew)
+            {
+                // App is already running. Exit this new instance immediately.
+                Environment.Exit(0);
+            }
+
             isNewPlusMode = newPlusMode;
             templatesDir = Path.Combine(appDataPath, "Templates");
             separatorsFile = Path.Combine(appDataPath, "separators.txt");
@@ -71,8 +85,8 @@ namespace FolderPlus
             EnsureDefaultSeparators();
             LoadHotkeys();
 
-            InitializeComponent();
             DetectContextPath();
+            InitializeComponent();
 
             this.SuspendLayout();
             if (isNewPlusMode) SetupNewPlusUI();
@@ -84,13 +98,25 @@ namespace FolderPlus
 
             this.Load += (s, e) => LoadLastState();
             this.FormClosing += HandleFormClosing;
+            this.Resize += HandleFormResize; // Minimize to Tray logic
             this.Click += (s, e) => { if (pnlHamburger != null) pnlHamburger.Visible = false; };
+        }
+
+        // Keep the app completely invisible if launched via -tray
+        protected override void SetVisibleCore(bool value)
+        {
+            if (startMinimized)
+            {
+                value = false;
+                if (!this.IsHandleCreated) CreateHandle();
+            }
+            base.SetVisibleCore(value);
         }
 
         // --- CONTEXT-AWARE SHORTCUT ENGINE ---
         private void InitializeContextTimer()
         {
-            contextTimer = new Timer();
+            contextTimer = new System.Windows.Forms.Timer(); // Explicit namespace
             contextTimer.Interval = 500;
             contextTimer.Tick += ContextTimer_Tick;
             contextTimer.Start();
@@ -147,6 +173,15 @@ namespace FolderPlus
         }
 
         // --- SYSTEM TRAY & PERSISTENCE ---
+        private void HandleFormResize(object sender, EventArgs e)
+        {
+            if (this.WindowState == FormWindowState.Minimized)
+            {
+                this.Hide();
+                if (!hasShownTrayNotification) { trayIcon.ShowBalloonTip(2000, "Mitraphix Folder+", "Running in background to listen for shortcuts.", ToolTipIcon.Info); hasShownTrayNotification = true; }
+            }
+        }
+
         private void HandleFormClosing(object sender, FormClosingEventArgs e)
         {
             SaveCurrentState();
@@ -175,6 +210,7 @@ namespace FolderPlus
 
         private void ShowApp()
         {
+            startMinimized = false;
             this.Controls.Clear();
             if (isNewPlusMode) SetupNewPlusUI(); else SetupMitraphixUI();
             LoadLastState(); this.Show(); this.WindowState = FormWindowState.Normal; this.BringToFront(); this.Activate();
@@ -185,10 +221,22 @@ namespace FolderPlus
             try
             {
                 string[] args = Environment.GetCommandLineArgs();
-                int pathIndex = isNewPlusMode ? 2 : 1;
-                if (args.Length > pathIndex)
+                List<string> cleanArgs = new List<string>();
+
+                foreach (string arg in args)
                 {
-                    string potentialPath = args[pathIndex].Trim('\"', ' ', '\'');
+                    if (arg.ToLower() == "-tray")
+                    {
+                        startMinimized = true;
+                        hasShownTrayNotification = true;
+                    }
+                    else cleanArgs.Add(arg);
+                }
+
+                int pathIndex = isNewPlusMode ? 2 : 1;
+                if (cleanArgs.Count > pathIndex)
+                {
+                    string potentialPath = cleanArgs[pathIndex].Trim('\"', ' ', '\'');
                     if (potentialPath.EndsWith("\\") && !potentialPath.EndsWith(":\\")) potentialPath = potentialPath.TrimEnd('\\');
                     if (Directory.Exists(potentialPath)) targetPath = potentialPath; else targetPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
                 }

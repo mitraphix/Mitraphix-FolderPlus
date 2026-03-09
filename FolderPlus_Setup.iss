@@ -12,7 +12,7 @@ UninstallDisplayIcon={app}\logo.ico
 
 ; Output location: Project directory
 OutputDir=C:\Users\smitr\source\repos\FolderPlus\FolderPlus\Output
-OutputBaseFilename=Mitraphix_FolderPlus_Setup_v1.3
+OutputBaseFilename=Mitraphix_FolderPlus_Setup_v1.3.0
 Compression=lzma
 SolidCompression=yes
 
@@ -28,6 +28,8 @@ Source: "C:\Users\smitr\source\repos\FolderPlus\FolderPlus\logo.ico"; DestDir: "
 [Icons]
 Name: "{group}\Mitraphix Folder+"; Filename: "{app}\FolderPlus.exe"
 Name: "{commondesktop}\Mitraphix Folder+"; Filename: "{app}\FolderPlus.exe"
+; Add to Windows Startup (Boot) running silently
+Name: "{autostartup}\Mitraphix Folder+"; Filename: "{app}\FolderPlus.exe"; Parameters: "-tray"
 
 [Registry]
 ; Standard Folder+ Menu
@@ -39,6 +41,10 @@ Root: HKCR; Subkey: "Directory\Background\shell\FolderPlus\command"; ValueType: 
 Root: HKCR; Subkey: "Directory\Background\shell\MitraphixNewPlus"; ValueType: string; ValueData: "New+"; Flags: uninsdeletekey
 Root: HKCR; Subkey: "Directory\Background\shell\MitraphixNewPlus"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\logo.ico"
 Root: HKCR; Subkey: "Directory\Background\shell\MitraphixNewPlus\command"; ValueType: string; ValueData: """{app}\FolderPlus.exe"" -newplus ""%V """
+
+[Run]
+; Auto-Run the app silently in the background immediately after installation
+Filename: "{app}\FolderPlus.exe"; Parameters: "-tray"; Description: "Start Folder+ Background Service"; Flags: nowait postinstall skipifsilent
 
 [Code]
 function InitializeSetup(): Boolean;
